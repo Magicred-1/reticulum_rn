@@ -1,0 +1,2 @@
+# ReticulumMobile.xcframework is generated here by build_rust_ios.sh.
+# It is gitignored — run `bash expo-module/ios/build_rust_ios.sh` to produce it.

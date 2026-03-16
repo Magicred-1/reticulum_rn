@@ -1,0 +1,61 @@
+plugins {
+    id 'com.android.library'
+    id 'org.jetbrains.kotlin.android'
+}
+
+// cargo-ndk builds the Rust .so for all ABI targets.
+// Install: cargo install cargo-ndk
+// NDK path is read from local.properties or ANDROID_NDK_HOME env.
+
+android {
+    namespace 'expo.modules.reticulum'
+    compileSdk 34
+
+    defaultConfig {
+        minSdk         24
+        targetSdk      34
+        // ABI filter — drop x86/x86_64 for release APKs (saves ~4MB)
+        ndk { abiFilters 'arm64-v8a', 'armeabi-v7a' }
+    }
+
+    sourceSets {
+        main {
+            // Tell Gradle where the pre-built .so files live after cargo-ndk runs
+            jniLibs.srcDirs = ['src/main/jniLibs']
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = '17' }
+}
+
+// Run cargo-ndk before the JNI libs are packaged.
+// Gradle task runs: cargo ndk -t arm64-v8a -t armeabi-v7a -o src/main/jniLibs build --release
+task buildRust(type: Exec) {
+    workingDir "${rootDir}/../../rust-core"  // relative to the android/ folder
+    commandLine 'cargo', 'ndk',
+        '--target', 'arm64-v8a',
+        '--target', 'armeabi-v7a',
+        '--output-dir', "${projectDir}/src/main/jniLibs",
+        '--',
+        'build', '--release'
+    // Only re-run if Rust sources changed
+    inputs.dir  "${workingDir}/src"
+    inputs.file "${workingDir}/Cargo.toml"
+    outputs.dir "${projectDir}/src/main/jniLibs"
+}
+
+// Hook Rust build into the normal Android build graph
+tasks.whenTaskAdded { task ->
+    if (task.name == 'mergeDebugJniLibFolders' || task.name == 'mergeReleaseJniLibFolders') {
+        task.dependsOn buildRust
+    }
+}
+
+dependencies {
+    implementation 'expo.modules.kotlin:expo-modules-core:1.12.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+}

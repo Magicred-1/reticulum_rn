@@ -1,0 +1,9 @@
+{
+  "platforms": ["ios", "android"],
+  "ios": {
+    "modules": ["ReticulumModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.reticulum.ReticulumModule"]
+  }
+}

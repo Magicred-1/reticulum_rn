@@ -1,0 +1,37 @@
+[package]
+name    = "reticulum_mobile"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name       = "reticulum_mobile"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+reticulum   = "0.1.0"
+lazy_static = "1.4"
+log         = "0.4"
+# Explicit features only — avoids pulling in unused proc-macros that cause
+# the "failed to load macro .so" error on incremental/corrupted builds.
+tokio = { version = "1", features = [
+    "rt-multi-thread",  # Builder::new_multi_thread()
+    "time",             # tokio::time::sleep
+    "sync",             # tokio::sync::{broadcast, Mutex}
+    "macros",           # tokio::select!, tokio::spawn
+    "net",              # tokio::net::UdpSocket (AutoInterface)
+] }
+tokio-util  = { version = "0.7", features = ["rt"] }
+rand_core   = { version = "0.6", features = ["getrandom"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni         = { version = "0.21", features = ["invocation"] }
+android_log = "0.1"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+env_logger  = "0.10"
+
+[profile.release]
+opt-level = 3
+lto       = true
+panic     = "abort"
+strip     = true

@@ -1,0 +1,24 @@
+{
+  "name": "expo-reticulum",
+  "version": "0.1.0",
+  "description": "Expo module wrapping Reticulum-rs for BLE/LoRa mesh networking",
+  "packageManager": "pnpm@10.18.3",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "repository": "https://github.com/anon0mesh/anon0mesh",
+  "license": "MIT",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "expo": "*",
+    "expo-file-system": "*",
+    "expo-modules-core": "*",
+    "react": "*",
+    "react-native": "*"
+  },
+  "devDependencies": {
+    "@types/react": "^18.0.0",
+    "typescript": "^5.0.0"
+  }
+}

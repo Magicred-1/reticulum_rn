@@ -1,0 +1,9 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- No permissions declared here — the host app declares them.
+         Required permissions for BLE in the host app's manifest:
+           <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+           <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+           <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+           <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    -->
+</manifest>
