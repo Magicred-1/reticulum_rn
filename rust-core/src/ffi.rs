@@ -59,6 +59,7 @@ pub unsafe extern "C" fn mesh_is_running() -> bool {
 pub unsafe extern "C" fn mesh_add_interface(
     name_ptr: *const u8, name_len: usize,
     arg_ptr:  *const u8, arg_len:  usize,
+    mode_ptr: *const u8, mode_len: usize,
 ) -> i32 {
     if name_ptr.is_null() || name_len == 0 { return -1; }
     let slice = unsafe { std::slice::from_raw_parts(name_ptr, name_len) };
@@ -73,6 +74,15 @@ pub unsafe extern "C" fn mesh_add_interface(
     } else {
         None
     };
+    let mode = if !mode_ptr.is_null() && mode_len > 0 {
+        let slice = unsafe { std::slice::from_raw_parts(mode_ptr, mode_len) };
+        std::str::from_utf8(slice).unwrap_or("full")
+    } else {
+        "full"
+    };
+
+    let static_mode = crate::node::InterfaceMode::from_str(mode);
+
     // We need a &'static str — only accept known names.
     let static_name: &'static str = match name {
         "ble"        => "ble",
@@ -84,7 +94,7 @@ pub unsafe extern "C" fn mesh_add_interface(
     };
     let mut guard = NODE.lock().unwrap();
     match guard.as_mut() {
-        Some(n) => n.add_interface(static_name, arg) as i32,
+        Some(n) => n.add_interface(static_name, arg, static_mode) as i32,
         None    => -1,
     }
 }

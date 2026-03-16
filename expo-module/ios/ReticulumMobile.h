@@ -18,7 +18,8 @@ bool mesh_is_running(void);
 // Supported names: "ble", "lora", "auto", "tcp_client", "tcp_server"
 // arg_ptr is optional and used for TCP addresses (e.g. "1.2.3.4:4242")
 int32_t mesh_add_interface(const uint8_t *name_ptr, size_t name_len,
-                           const uint8_t *arg_ptr,  size_t arg_len);
+                           const uint8_t *arg_ptr,  size_t arg_len,
+                           const uint8_t *mode_ptr, size_t mode_len);
 
 // Native radio I/O
 // Push bytes received from BLE/LoRa into the named interface.

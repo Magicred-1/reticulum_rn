@@ -53,8 +53,8 @@ class ReticulumModule : Module() {
 
         // ── Interface registration ─────────────────────────────────────────
 
-        Function("addInterface") { name: String, arg: String? ->
-            meshAddInterface(name, arg ?: "")
+        Function("addInterface") { name: String, arg: String?, mode: String? ->
+            meshAddInterface(name, arg ?: "", mode ?: "full")
         }
 
         // ── Native radio I/O ───────────────────────────────────────────────
@@ -172,7 +172,7 @@ class ReticulumModule : Module() {
     private external fun meshIsRunning(): Boolean
 
     /** Returns interface index ≥ 0, or -1 on failure. */
-    private external fun meshAddInterface(name: String): Int
+    private external fun meshAddInterface(name: String, arg: String, mode: String): Int
 
     private external fun meshPushRx(ifaceName: String, data: ByteArray): Boolean
     /** Returns next outgoing packet for the named interface, or null. */

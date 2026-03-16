@@ -58,6 +58,7 @@ pub extern "system" fn Java_expo_modules_reticulum_ReticulumModule_meshAddInterf
     _class:  JClass,
     path:    JString,
     arg:     JString,
+    mode:    JString,
 ) -> jint {
     let name_rs: String = match env.get_string(&path) {
         Ok(s) => s.into(),
@@ -70,13 +71,20 @@ pub extern "system" fn Java_expo_modules_reticulum_ReticulumModule_meshAddInterf
         None
     };
 
+    let mode_rs: String = if !mode.is_null() {
+        env.get_string(&mode).ok().map(|s| s.into()).unwrap_or_else(|| "full".into())
+    } else {
+        "full".into()
+    };
+
     let (name_ptr, name_len) = (name_rs.as_ptr(), name_rs.len());
     let (arg_ptr, arg_len)   = match &arg_rs {
         Some(s) => (s.as_ptr(), s.len()),
         None    => (std::ptr::null(), 0),
     };
+    let (mode_ptr, mode_len) = (mode_rs.as_ptr(), mode_rs.len());
 
-    unsafe { ffi::mesh_add_interface(name_ptr, name_len, arg_ptr, arg_len) }
+    unsafe { ffi::mesh_add_interface(name_ptr, name_len, arg_ptr, arg_len, mode_ptr, mode_len) }
 }
 
 // ── Data path ─────────────────────────────────────────────────────────────────
@@ -186,7 +194,7 @@ pub extern "system" fn Java_expo_modules_reticulum_ReticulumModule_meshSendTo(
 /// First byte of the array is the dest_tag (0x00 = node, 0x01 = tx group).
 #[no_mangle]
 pub extern "system" fn Java_expo_modules_reticulum_ReticulumModule_meshPoll(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class:  JClass,
 ) -> jbyteArray {
     let mut buf     = vec![0u8; 4096];
@@ -212,7 +220,7 @@ use jni::sys::jstring;
 /// Returns our local destination hash as a 32-char hex String, or null.
 #[no_mangle]
 pub extern "system" fn Java_expo_modules_reticulum_ReticulumModule_meshLocalHash(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class:  JClass,
 ) -> jstring {
     let mut buf = vec![0u8; 33];
@@ -230,7 +238,7 @@ pub extern "system" fn Java_expo_modules_reticulum_ReticulumModule_meshLocalHash
 /// Returns the GROUP tx relay hash as a 32-char hex String, or null.
 #[no_mangle]
 pub extern "system" fn Java_expo_modules_reticulum_ReticulumModule_meshTxGroupHash(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class:  JClass,
 ) -> jstring {
     let mut buf = vec![0u8; 33];
@@ -259,7 +267,7 @@ pub extern "system" fn Java_expo_modules_reticulum_ReticulumModule_meshPeerCount
 /// App data (display name) is returned as a separate call to meshGetPeerAppData.
 #[no_mangle]
 pub extern "system" fn Java_expo_modules_reticulum_ReticulumModule_meshGetPeerHash(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class:  JClass,
     index:   jint,
 ) -> jstring {
@@ -288,7 +296,7 @@ pub extern "system" fn Java_expo_modules_reticulum_ReticulumModule_meshGetPeerHa
 /// Returns a peer's app_data bytes, or null if index out of range or no app_data.
 #[no_mangle]
 pub extern "system" fn Java_expo_modules_reticulum_ReticulumModule_meshGetPeerAppData(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class:  JClass,
     index:   jint,
 ) -> jbyteArray {

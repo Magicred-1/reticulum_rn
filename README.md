@@ -92,6 +92,30 @@ export default function App() {
 }
 ```
 
+## Testing
+
+### Rust Core
+Run the Rust unit tests to verify protocol logic, address hashing, and interface modes:
+```bash
+cd rust-core
+cargo test
+```
+
+### TypeScript / Expo Module
+Run the Jest suite to verify the TS API and the `useMesh` hook logic:
+```bash
+cd expo-module
+pnpm test
+```
+
+### Full Integration
+To verify actual native device behavior, run the development build:
+```bash
+npx expo run:android # or run:ios
+```
+Use the provided `MeshScreen.tsx` for a manual UI testing console.
+
+
 ## Packet wire format
 
 Every item emitted from the Rust rx queue is prefixed with one `dest_tag` byte:

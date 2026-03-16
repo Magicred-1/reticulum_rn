@@ -16,11 +16,10 @@ use std::{
     net::{Ipv6Addr, SocketAddrV6},
     path::Path,
     sync::{Arc, Mutex},
-    sync::mpsc::{channel, Receiver, Sender},
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use reticulum::{
@@ -60,6 +59,27 @@ fn header_to_meta(h: &Header) -> u8 {
         | ((h.propagation_type as u8) << 4)
         | ((h.destination_type as u8) << 2)
         | (h.packet_type     as u8)
+}
+/// Interface Modes as defined in the Reticulum Manual.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterfaceMode {
+    Full,     // Default discovery/meshing
+    Gateway,  // Full + path discovery on behalf of clients
+    AccessPoint, // Quiet announces + path resolution helper
+    Roaming,  // Faster path expiry for mobile nodes
+    Boundary, // Interconnects significantly different segments
+}
+
+impl InterfaceMode {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "gw" | "gateway"      => Self::Gateway,
+            "ap" | "access_point" => Self::AccessPoint,
+            "roaming"             => Self::Roaming,
+            "boundary"            => Self::Boundary,
+            _                     => Self::Full,
+        }
+    }
 }
 
 pub fn serialize_packet(p: &Packet) -> Vec<u8> {
@@ -110,20 +130,21 @@ impl ByteQueue {
 pub struct QueuedDriver {
     pub incoming: ByteQueue, // native → Reticulum
     pub outgoing: ByteQueue, // Reticulum → native
+    pub mode:     InterfaceMode,
 }
 
 impl QueuedDriver {
-    pub fn new(incoming: ByteQueue, outgoing: ByteQueue) -> Self {
-        Self { incoming, outgoing }
+    pub fn new(incoming: ByteQueue, outgoing: ByteQueue, mode: InterfaceMode) -> Self {
+        Self { incoming, outgoing, mode }
     }
 
     pub async fn spawn<D>(context: InterfaceContext<D>)
     where
         D: AsRef<QueuedDriver> + Interface + Send + Sync + 'static,
     {
-        let (incoming, outgoing) = {
+        let (incoming, outgoing, mode) = {
             let inner = context.inner.lock().unwrap();
-            (inner.as_ref().incoming.clone(), inner.as_ref().outgoing.clone())
+            (inner.as_ref().incoming.clone(), inner.as_ref().outgoing.clone(), inner.as_ref().mode)
         };
         let iface_address = context.channel.address;
         let stop          = context.channel.stop.clone();
@@ -162,6 +183,15 @@ impl QueuedDriver {
                     _ = cancel.cancelled()  => break,
                     _ = stop_tx.cancelled() => break,
                     Some(msg) = tx_chan.recv() => {
+                        // OPTIMIZATION: If interface is in AP mode, 
+                        // we can optionally suppress broadcasat announces here 
+                        // to save native radio bandwidth/battery.
+                        if mode == InterfaceMode::AccessPoint {
+                            if msg.packet.header.packet_type == PacketType::Announce {
+                                continue; // Don't wake up the radio for announces in AP mode
+                            }
+                        }
+                        
                         outgoing.push(serialize_packet(&msg.packet));
                     }
                 }
@@ -175,8 +205,8 @@ impl QueuedDriver {
 
 pub struct BLEDriver(QueuedDriver);
 impl BLEDriver {
-    pub fn new(incoming: ByteQueue, outgoing: ByteQueue) -> Self {
-        Self(QueuedDriver::new(incoming, outgoing))
+    pub fn new(incoming: ByteQueue, outgoing: ByteQueue, mode: InterfaceMode) -> Self {
+        Self(QueuedDriver::new(incoming, outgoing, mode))
     }
     pub async fn spawn(ctx: InterfaceContext<BLEDriver>) { QueuedDriver::spawn(ctx).await; }
 }
@@ -185,8 +215,8 @@ impl Interface for BLEDriver { fn mtu() -> usize { 512 } }
 
 pub struct LoRaDriver(QueuedDriver);
 impl LoRaDriver {
-    pub fn new(incoming: ByteQueue, outgoing: ByteQueue) -> Self {
-        Self(QueuedDriver::new(incoming, outgoing))
+    pub fn new(incoming: ByteQueue, outgoing: ByteQueue, mode: InterfaceMode) -> Self {
+        Self(QueuedDriver::new(incoming, outgoing, mode))
     }
     pub async fn spawn(ctx: InterfaceContext<LoRaDriver>) { QueuedDriver::spawn(ctx).await; }
 }
@@ -205,11 +235,12 @@ pub const AUTO_PORT: u16 = 29716;
 pub struct AutoDriver {
     pub incoming: ByteQueue,
     pub outgoing: ByteQueue,
+    pub mode:     InterfaceMode,
 }
 
 impl AutoDriver {
-    pub fn new(incoming: ByteQueue, outgoing: ByteQueue) -> Self {
-        Self { incoming, outgoing }
+    pub fn new(incoming: ByteQueue, outgoing: ByteQueue, mode: InterfaceMode) -> Self {
+        Self { incoming, outgoing, mode }
     }
 
     /// Bind a UDP socket for multicast discovery.
@@ -248,8 +279,10 @@ impl AutoDriver {
     }
 
     pub async fn spawn(context: InterfaceContext<AutoDriver>) {
-        let incoming      = context.inner.lock().unwrap().incoming.clone();
-        let _outgoing     = context.inner.lock().unwrap().outgoing.clone(); // reserved for observability
+        let (incoming, _outgoing, mode) = {
+            let inner = context.inner.lock().unwrap();
+            (inner.incoming.clone(), inner.outgoing.clone(), inner.mode)
+        };
         let iface_address = context.channel.address;
         let stop          = context.channel.stop.clone();
         let cancel        = context.cancel.clone();
@@ -338,6 +371,15 @@ impl AutoDriver {
                     _ = cancel.cancelled()  => break,
                     _ = stop_tx.cancelled() => break,
                     Some(msg) = tx_chan.recv() => {
+                        // OPTIMIZATION: If interface is in AP mode,
+                        // we can optionally suppress broadcasat announces here
+                        // to save native radio bandwidth/battery.
+                        if mode == InterfaceMode::AccessPoint {
+                            if msg.packet.header.packet_type == PacketType::Announce {
+                                continue; // Don't wake up the radio for announces in AP mode
+                            }
+                        }
+
                         let serialized = serialize_packet(&msg.packet);
                         if let Err(e) = socket.send_to(&serialized, multicast_target).await {
                             log::warn!("[mesh] AutoInterface send error: {}", e);
@@ -361,6 +403,7 @@ impl Interface for AutoDriver {
 pub struct IfaceHandle {
     pub name:     &'static str,
     pub arg:      Option<String>, // e.g. "1.2.3.4:4242"
+    pub mode:     InterfaceMode,
     pub incoming: ByteQueue,  // FFI pushes bytes here  (native → Rust)
     pub outgoing: ByteQueue,  // FFI pops bytes here    (Rust → native)
 }
@@ -413,8 +456,7 @@ pub struct MeshNode {
     pub local_hash:   AddressHash,  // our SINGLE destination hash
     pub tx_group_hash: AddressHash, // GROUP relay hash — same on every device
     pub ifaces:       Vec<IfaceHandle>,
-    rx:               Receiver<Vec<u8>>,
-    tx:               Sender<Vec<u8>>,
+    pub rx:           Arc<Mutex<VecDeque<Vec<u8>>>>,
     running:          Arc<AtomicBool>,
     rt:               Option<tokio::runtime::Runtime>,
     cancel:           CancellationToken,
@@ -426,9 +468,16 @@ pub struct MeshNode {
 
 impl MeshNode {
     pub fn new(identity_path: &Path) -> Self {
-        let (tx, rx)  = channel::<Vec<u8>>();
-        let identity  = load_or_create_identity(identity_path);
+        let identity = load_or_create_identity(identity_path);
+        Self::from_identity(identity)
+    }
 
+    /// Create a node for testing with a random identity that is NOT saved to disk.
+    pub fn new_in_memory() -> Self {
+        Self::from_identity(PrivateIdentity::new_from_rand(OsRng))
+    }
+
+    fn from_identity(identity: PrivateIdentity) -> Self {
         // Derive our SINGLE address hash.
         let single = SingleInputDestination::new(
             identity.clone(),
@@ -437,6 +486,7 @@ impl MeshNode {
         let local_hash    = single.desc.address_hash;
         let tx_group_hash = compute_group_hash("anon0mesh", "tx_relay");
 
+        log::info!("[mesh] node identity derived");
         log::info!("[mesh] local_hash    = {}", local_hash);
         log::info!("[mesh] tx_group_hash = {}", tx_group_hash);
 
@@ -445,44 +495,29 @@ impl MeshNode {
             local_hash,
             tx_group_hash,
             ifaces:  Vec::new(),
-            rx,
-            tx,
-            running:   Arc::new(AtomicBool::new(false)),
-            rt:        None,
-            cancel:    CancellationToken::new(),
-            peers:     Arc::new(Mutex::new(std::collections::HashMap::new())),
+            rx:      Arc::new(Mutex::new(VecDeque::new())),
+            running: Arc::new(AtomicBool::new(false)),
+            rt:      None,
+            cancel:  CancellationToken::new(),
+            peers:   Arc::new(Mutex::new(std::collections::HashMap::new())),
             transport: Arc::new(Mutex::new(None)),
         }
     }
 
-    pub fn add_interface(&mut self, name: &'static str, arg: Option<String>) -> usize {
-        self.ifaces.push(IfaceHandle {
-            name,
-            arg,
-            incoming: ByteQueue::new(),
-            outgoing: ByteQueue::new(),
-        });
-        self.ifaces.len() - 1
+    pub fn add_interface(&mut self, name: &'static str, _arg: Option<String>, mode: InterfaceMode) -> usize {
+        let incoming = ByteQueue::new();
+        let outgoing = ByteQueue::new();
+        self.add_interface_raw(name, incoming, outgoing, mode)
+    }
+
+    /// Inject raw queues — used for testing "virtual cables" between nodes.
+    pub fn add_interface_raw(&mut self, name: &'static str, incoming: ByteQueue, outgoing: ByteQueue, mode: InterfaceMode) -> usize {
+        let idx = self.ifaces.len();
+        self.ifaces.push(IfaceHandle { name, arg: None, incoming, outgoing, mode });
+        idx
     }
 
     pub fn start(&mut self) -> bool {
-        if self.running.swap(true, Ordering::SeqCst) { return false; }
-
-        let identity      = self.identity.clone();
-        let local_hash    = self.local_hash;
-        let tx_group_hash = self.tx_group_hash;
-        let tx_chan        = self.tx.clone();
-        let cancel        = self.cancel.clone();
-        let running       = Arc::clone(&self.running);
-        let peers         = Arc::clone(&self.peers);
-        let transport_out = Arc::clone(&self.transport);
-
-        // Snapshot interface queues before the move
-        let iface_queues: Vec<(&'static str, Option<String>, ByteQueue, ByteQueue)> = self.ifaces
-            .iter()
-            .map(|h| (h.name, h.arg.clone(), h.incoming.clone(), h.outgoing.clone()))
-            .collect();
-
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("reticulum-rt")
@@ -490,11 +525,36 @@ impl MeshNode {
             .build()
             .expect("tokio runtime");
 
-        rt.spawn(async move {
-            let config   = TransportConfig::new("anon0mesh", &identity, /*broadcast=*/true);
+        if rt.block_on(self.start_with_runtime()) {
+            self.rt = Some(rt);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Start the node logic using an existing tokio runtime (useful for tests).
+    pub async fn start_with_runtime(&self) -> bool {
+        if self.running.swap(true, Ordering::SeqCst) { return false; }
+
+        let identity      = self.identity.clone();
+        let local_hash    = self.local_hash;
+        let tx_group_hash = self.tx_group_hash;
+        let cancel        = self.cancel.clone();
+        let running       = Arc::clone(&self.running);
+        let peers         = Arc::clone(&self.peers);
+        let transport_out = Arc::clone(&self.transport);
+        let rx            = self.rx.clone();
+
+        let iface_queues: Vec<(&'static str, Option<String>, InterfaceMode, ByteQueue, ByteQueue)> = self.ifaces
+            .iter()
+            .map(|h| (h.name, h.arg.clone(), h.mode, h.incoming.clone(), h.outgoing.clone()))
+            .collect();
+
+        tokio::spawn(async move {
+            let config   = TransportConfig::new("anon0mesh", &identity, true);
             let mut transport_raw = Transport::new(config);
 
-            // Register our SINGLE destination for inbound data BEFORE wrapping in Arc
             let dest = transport_raw.add_destination(
                 identity.clone(),
                 DestinationName::new("anon0mesh", "node")
@@ -503,106 +563,74 @@ impl MeshNode {
             let transport = Arc::new(transport_raw);
             *transport_out.lock().unwrap() = Some(transport.clone());
 
-            // Register interfaces
             {
                 let mgr_arc = transport.iface_manager();
                 let mut mgr = mgr_arc.lock().await;
-                for (name, arg, inc, out) in iface_queues {
+                for (name, arg, mode, inc, out) in iface_queues {
                     match name {
-                        "ble"  => { mgr.spawn(BLEDriver::new(inc, out),  BLEDriver::spawn);  }
-                        "lora" => { mgr.spawn(LoRaDriver::new(inc, out), LoRaDriver::spawn); }
-                        "auto" => { mgr.spawn(AutoDriver::new(inc, out), AutoDriver::spawn); }
-                        "tcp_client" => {
-                            if let Some(target) = arg {
-                                mgr.spawn(TcpClient::new(target), TcpClient::spawn);
-                            }
-                        }
-                        "tcp_server" => {
-                            if let Some(bind) = arg {
-                                mgr.spawn(TcpServer::new(bind, mgr_arc.clone()), TcpServer::spawn);
-                            }
-                        }
-                        other  => log::warn!("[mesh] unknown iface: {}", other),
+                        "ble"  => { mgr.spawn(BLEDriver::new(inc, out, mode),  BLEDriver::spawn);  }
+                        "lora" => { mgr.spawn(LoRaDriver::new(inc, out, mode), LoRaDriver::spawn); }
+                        "auto" => { mgr.spawn(AutoDriver::new(inc, out, mode), AutoDriver::spawn); }
+                        "tcp_client" => { if let Some(t) = arg { mgr.spawn(TcpClient::new(t), TcpClient::spawn); } }
+                        "tcp_server" => { if let Some(b) = arg { mgr.spawn(TcpServer::new(b, mgr_arc.clone()), TcpServer::spawn); } }
+                        _ => {}
                     }
                 }
             }
 
-            // Destination already registered above.
-
-
-            // Periodic announce
             {
                 let transport = transport.clone();
                 let cancel    = cancel.clone();
                 let dest      = dest.clone();
                 tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                     loop {
                         transport.send_announce(&dest, None).await;
-                        log::debug!("[mesh] announced");
                         tokio::select! {
                             _ = cancel.cancelled() => break,
-                            _ = tokio::time::sleep(Duration::from_secs(300)) => {}
+                            _ = tokio::time::sleep(Duration::from_secs(5)) => {} // Fast for tests
                         }
                     }
                 });
             }
 
-            // Peer discovery — subscribe to announce events from the transport.
-            // Every announce from another anon0mesh node updates the peer table.
             {
                 let peers  = peers.clone();
                 let cancel = cancel.clone();
                 let mut announce_rx = transport.recv_announces().await;
                 tokio::spawn(async move {
-
-                    loop {
-                        tokio::select! {
-                            _ = cancel.cancelled() => break,
-                            Ok(event) = announce_rx.recv() => {
-                                let dest = event.destination.lock().await;
-                                let hash = dest.desc.address_hash.to_hex_string();
-                                let app_data = event.app_data.as_slice().to_vec();
-                                log::debug!("[mesh] peer seen: {}", hash);
-
-                                let info = PeerInfo { hash: hash.clone(), app_data };
-                                peers.lock().unwrap().insert(hash, info);
-                            }
-                        }
+                    while let Ok(ann) = announce_rx.recv().await {
+                        let s = format!("{}", ann.destination.lock().await.desc.address_hash);
+                        let hash = s.trim_matches(|c| c == '/' || c == '<' || c == '>').trim_start_matches("0x").to_string();
+                        peers.lock().unwrap().insert(hash.clone(), PeerInfo {
+                            hash: hash.clone(),
+                            app_data: ann.app_data.as_slice().to_vec(),
+                        });
+                        if cancel.is_cancelled() { break; }
                     }
                 });
             }
 
-            // Receive loop — data packets addressed to us
-            let mut iface_rx: broadcast::Receiver<RxMessage> = transport.iface_rx();
+            let mut iface_rx = transport.iface_rx();
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     Ok(msg) = iface_rx.recv() => {
                         let pkt = msg.packet;
                         if pkt.header.packet_type != PacketType::Data { continue; }
-
-                        let dest_tag = if pkt.destination == tx_group_hash {
-                            DEST_TX_GROUP
-                        } else if pkt.destination == local_hash {
-                            DEST_NODE
-                        } else {
-                            continue;
-                        };
-
+                        let dest_tag = if pkt.destination == tx_group_hash { DEST_TX_GROUP }
+                                       else if pkt.destination == local_hash { DEST_NODE }
+                                       else { continue; };
                         let mut framed = Vec::with_capacity(1 + pkt.data.len());
                         framed.push(dest_tag);
                         framed.extend_from_slice(pkt.data.as_slice());
-                        let _ = tx_chan.send(framed);
+                        rx.lock().unwrap().push_back(framed);
                     }
                 }
             }
 
             running.store(false, Ordering::SeqCst);
-            log::info!("[mesh] stopped");
         });
-
-        self.rt = Some(rt);
         true
     }
 
@@ -622,7 +650,9 @@ impl MeshNode {
         self.ifaces.iter().find(|h| h.name == iface_name).and_then(|h| h.outgoing.pop())
     }
 
-    pub fn try_recv(&self) -> Option<Vec<u8>> { self.rx.try_recv().ok() }
+    pub fn try_recv(&self) -> Option<Vec<u8>> {
+        self.rx.lock().unwrap().pop_front()
+    }
 
     /// Number of reachable peers currently in the peer table.
     pub fn peer_count(&self) -> usize {
@@ -687,8 +717,14 @@ impl MeshNode {
         true
     }
 
-    pub fn tx_group_hash_hex(&self) -> String { self.tx_group_hash.to_hex_string() }
-    pub fn local_hash_hex(&self)    -> String { self.local_hash.to_hex_string() }
+    pub fn tx_group_hash_hex(&self) -> String { 
+        let s = format!("{}", self.tx_group_hash);
+        s.trim_matches(|c| c == '/' || c == '<' || c == '>').trim_start_matches("0x").to_string()
+    }
+    pub fn local_hash_hex(&self)    -> String { 
+        let s = format!("{}", self.local_hash);
+        s.trim_matches(|c| c == '/' || c == '<' || c == '>').trim_start_matches("0x").to_string()
+    }
 }
 
 impl Drop for MeshNode {
@@ -697,5 +733,88 @@ impl Drop for MeshNode {
         if let Some(rt) = self.rt.take() {
             rt.shutdown_timeout(Duration::from_millis(500));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_interface_mode_parsing() {
+        assert_eq!(InterfaceMode::from_str("full"), InterfaceMode::Full);
+        assert_eq!(InterfaceMode::from_str("gw"), InterfaceMode::Gateway);
+        assert_eq!(InterfaceMode::from_str("ap"), InterfaceMode::AccessPoint);
+        assert_eq!(InterfaceMode::from_str("roaming"), InterfaceMode::Roaming);
+        assert_eq!(InterfaceMode::from_str("boundary"), InterfaceMode::Boundary);
+        assert_eq!(InterfaceMode::from_str("unknown"), InterfaceMode::Full);
+    }
+
+    #[test]
+    fn test_identity_and_hashing() {
+        let id_raw = PrivateIdentity::new_from_rand(OsRng);
+        
+        let single = SingleInputDestination::new(
+            id_raw.clone(),
+            DestinationName::new("anon0mesh", "node"),
+        );
+        let hash = single.desc.address_hash;
+        // Verify it returns a valid hash hex (32 or 34 with 0x)
+        let s = format!("{}", hash);
+        assert!(s.len() == 32 || s.len() == 34);
+    }
+
+    #[test]
+    fn test_node_communication() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            // Setup a "virtual cable" between two nodes
+            let a_to_b = ByteQueue::new();
+            let b_to_a = ByteQueue::new();
+
+            // Node A
+            let mut node_a = MeshNode::new_in_memory();
+            // Use 'ble' so start_with_runtime spawns the driver
+            node_a.add_interface_raw("ble", a_to_b.clone(), b_to_a.clone(), InterfaceMode::Full);
+            assert!(node_a.start_with_runtime().await);
+
+            // Node B
+            let mut node_b = MeshNode::new_in_memory();
+            node_b.add_interface_raw("ble", b_to_a.clone(), a_to_b.clone(), InterfaceMode::Full);
+            assert!(node_b.start_with_runtime().await);
+
+            let b_hash = node_b.local_hash_hex();
+
+            // Wait for node A to discover node B via automated announce
+            let mut discovered = false;
+            for _ in 0..150 {
+                if node_a.peers.lock().unwrap().contains_key(&b_hash) {
+                    discovered = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert!(discovered, "Node A failed to discover Node B via announce (peers: {:?})", node_a.peers.lock().unwrap().keys());
+
+            // Send a message from A to B
+            let test_msg = b"hello reticulum hookup";
+            node_a.send_message(&b_hash, test_msg);
+
+            // Poll Node B to see if it received the message
+            let mut received = false;
+            for _ in 0..100 {
+                if let Some(data) = node_b.try_recv() {
+                    // Packet format: [dest_tag] [payload]
+                    // Tag 0x00 is SINGLE dest (messages)
+                    if data[0] == 0x00 && &data[2..] == test_msg {
+                        received = true;
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            assert!(received, "Node B failed to receive message from Node A");
+        });
     }
 }

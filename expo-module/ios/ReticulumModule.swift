@@ -56,14 +56,18 @@ public class ReticulumModule: Module {
         /// Returns the interface index, or -1 on failure. Must call before start().
         /// Supported names: "ble", "lora", "auto", "tcp_client", "tcp_server"
         /// arg is optional and used for TCP addresses (e.g. "1.2.3.4:4242")
-        Function("addInterface") { (name: String, arg: String?) -> Int32 in
+        Function("addInterface") { (name: String, arg: String?, mode: String?) -> Int32 in
             name.withCString { nameCStr in
-                let argStr = arg ?? ""
+                let argStr  = arg  ?? ""
+                let modeStr = mode ?? "full"
                 return argStr.withCString { argCStr in
-                    mesh_add_interface(
-                        UnsafePointer<UInt8>(OpaquePointer(nameCStr)), name.utf8.count,
-                        UnsafePointer<UInt8>(OpaquePointer(argCStr)), argStr.utf8.count
-                    )
+                    modeStr.withCString { modeCStr in
+                        mesh_add_interface(
+                            UnsafePointer<UInt8>(OpaquePointer(nameCStr)), name.utf8.count,
+                            UnsafePointer<UInt8>(OpaquePointer(argCStr)),  argStr.utf8.count,
+                            UnsafePointer<UInt8>(OpaquePointer(modeCStr)), modeStr.utf8.count
+                        )
+                    }
                 }
             }
         }
