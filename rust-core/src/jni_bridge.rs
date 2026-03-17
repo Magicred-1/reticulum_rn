@@ -329,3 +329,45 @@ pub extern "system" fn Java_expo_modules_reticulum_ReticulumModule_meshClearPeer
 ) {
     unsafe { ffi::mesh_clear_peers() }
 }
+
+#[no_mangle]
+pub extern "system" fn Java_expo_modules_reticulum_ReticulumModule_meshFetchMessages(
+    mut env: JNIEnv,
+    _class: JClass,
+    limit:  jint,
+) -> jstring {
+    let mut buf     = vec![0u8; 16384]; // 16KB initially
+    let mut out_len = 0usize;
+
+    let ok = unsafe {
+        ffi::mesh_fetch_messages(
+            limit as u32,
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut out_len,
+        )
+    };
+
+    if !ok && out_len > buf.len() {
+        // Retry with larger buffer if needed
+        buf.resize(out_len, 0);
+        let ok2 = unsafe {
+            ffi::mesh_fetch_messages(
+                limit as u32,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut out_len,
+            )
+        };
+        if !ok2 { return std::ptr::null_mut(); }
+    } else if !ok {
+        return std::ptr::null_mut();
+    }
+
+    buf.truncate(out_len);
+    let json = std::str::from_utf8(&buf).unwrap_or("[]");
+    match env.new_string(json) {
+        Ok(s)  => s.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}

@@ -23,6 +23,7 @@ type ReticulumModuleType = {
   peerCount(): number;
   peers(): Array<{ hash: string; appData: number[] }>;
   clearPeers(): void;
+  fetchMessages(limit: number): Promise<string>;
   // Events
   addListener(eventName: string, listener: (...args: any[]) => void): EventSubscription;
 };
@@ -149,6 +150,23 @@ export function peers(): Peer[] {
 /** Clear the entire peer table. */
 export function clearPeers(): void {
   ReticulumNative.clearPeers();
+}
+
+export interface StoredMessage {
+  timestamp: string;
+  src_hash: string;
+  dest_hash: string;
+  content: string;
+}
+
+/**
+ * Fetch historical messages from the native SQLite database.
+ * @param limit Max number of messages to return.
+ * @returns A JSON string (array of StoredMessage) from the native layer.
+ */
+export async function fetchMessages(limit: number = 50): Promise<StoredMessage[]> {
+  const json = await ReticulumNative.fetchMessages(limit);
+  return JSON.parse(json);
 }
 
 // ── Events ────────────────────────────────────────────────────────────────────

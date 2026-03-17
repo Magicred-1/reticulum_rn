@@ -158,6 +158,28 @@ public class ReticulumModule: Module {
         Function("clearPeers") {
             mesh_clear_peers()
         }
+
+        AsyncFunction("fetchMessages") { (limit: UInt32, promise: Promise) in
+            var buf    = [UInt8](repeating: 0, count: 16384)
+            var outLen = 0
+            let ok = mesh_fetch_messages(limit, &buf, buf.count, &outLen)
+            
+            if !ok && outLen > buf.count {
+                // Retry with larger buffer
+                buf    = [UInt8](repeating: 0, count: outLen)
+                let ok2 = mesh_fetch_messages(limit, &buf, buf.count, &outLen)
+                if !ok2 {
+                    promise.reject("FETCH_FAILED", "Failed to fetch messages (too large?)")
+                    return
+                }
+            } else if !ok {
+                promise.reject("FETCH_FAILED", "Failed to fetch messages from DB")
+                return
+            }
+            
+            let json = String(bytes: buf.prefix(outLen), encoding: .utf8) ?? "[]"
+            promise.resolve(json)
+        }
     }
 
     // ── RX poll loop — drains decoded inbound packets → JS events ─────────

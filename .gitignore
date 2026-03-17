@@ -10,6 +10,13 @@ expo-module/android/src/main/jniLibs/
 # Node
 node_modules/
 .expo/
+dist/
+
+# Android
+.gradle/
+build/
+local.properties
+*.iml
 
 # Misc
 .DS_Store

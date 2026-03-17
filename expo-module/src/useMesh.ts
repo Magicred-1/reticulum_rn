@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Reticulum from './index';
-import type { OutgoingPacketEvent, Peer } from './index';
+import type { OutgoingPacketEvent, Peer, StoredMessage } from './index';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -44,6 +44,8 @@ export interface UseMeshReturn {
   peers: Peer[];
   refreshPeers: () => void;
   clearPeers: () => void;
+  messages: StoredMessage[];
+  fetchMessages: (limit?: number) => Promise<void>;
 }
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
@@ -56,6 +58,7 @@ export function useMesh(options: UseMeshOptions = {}): UseMeshReturn {
   const [txGroupHash, setTxGroupHash] = useState<string | null>(null);
   const [packets, setPackets] = useState<MeshPacket[]>([]);
   const [peers, setPeers] = useState<Peer[]>([]);
+  const [messages, setMessages] = useState<StoredMessage[]>([]);
 
   // Stable refs so callbacks don't cause subscription re-runs
   const onPacketRef = useRef(onPacket); onPacketRef.current = onPacket;
@@ -166,12 +169,21 @@ export function useMesh(options: UseMeshOptions = {}): UseMeshReturn {
 
   const clearPackets = useCallback(() => setPackets([]), []);
 
+  const fetchMessages = useCallback(async (limit: number = 50) => {
+    try {
+      const msgs = await Reticulum.fetchMessages(limit);
+      setMessages(msgs);
+    } catch (err) {
+      console.warn('[mesh] fetchMessages error:', err);
+    }
+  }, []);
+
   // ── Cleanup ───────────────────────────────────────────────────────────────
 
   useEffect(() => { return () => { Reticulum.stop(); }; }, []);
 
   return {
-    running, localHash, txGroupHash, packets, peers,
-    start, stop, sendTx, sendTo, pushRx, clearPackets, refreshPeers, clearPeers,
+    running, localHash, txGroupHash, packets, peers, messages,
+    start, stop, sendTx, sendTo, pushRx, clearPackets, refreshPeers, clearPeers, fetchMessages
   };
 }

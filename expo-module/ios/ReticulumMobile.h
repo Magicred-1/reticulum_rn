@@ -65,6 +65,9 @@ bool mesh_get_peer(uint32_t index,
 // Remove all peers from the table.
 void mesh_clear_peers(void);
 
+// Fetch historical messages from SQLite. Returns JSON array string in buf.
+bool mesh_fetch_messages(uint32_t limit, uint8_t *buf, size_t buf_len, size_t *out_len);
+
 #ifdef __cplusplus
 }
 #endif

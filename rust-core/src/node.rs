@@ -13,7 +13,7 @@
 use rand_core::OsRng;
 use std::{
     collections::VecDeque,
-    net::{Ipv6Addr, SocketAddrV6},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     path::Path,
     sync::{Arc, Mutex},
     sync::atomic::{AtomicBool, Ordering},
@@ -33,11 +33,13 @@ use reticulum::{
         Interface, InterfaceContext, RxMessage,
     },
     packet::{
-        DestinationType, Header, HeaderType, IfacFlag, Packet, PacketContext,
+        ContextFlag, DestinationType, Header, HeaderType, IfacFlag, Packet, PacketContext,
         PacketDataBuffer, PacketType, PropagationType,
     },
     transport::{Transport, TransportConfig},
 };
+use rusqlite::{params, Connection};
+// use lxmf::message::Message as LxmfMessage;
 
 // ── Payload type tags ─────────────────────────────────────────────────────────
 
@@ -56,6 +58,7 @@ pub const DEST_TX_GROUP: u8 = 0x01; // addressed to the GROUP relay destination
 fn header_to_meta(h: &Header) -> u8 {
     ((h.ifac_flag        as u8) << 7)
         | ((h.header_type    as u8) << 6)
+        | ((h.context_flag   as u8) << 5)
         | ((h.propagation_type as u8) << 4)
         | ((h.destination_type as u8) << 2)
         | (h.packet_type     as u8)
@@ -227,8 +230,10 @@ impl Interface for LoRaDriver { fn mtu() -> usize { 235 } }
 
 // ── Auto interface (UDP multicast — WiFi/LAN discovery) ──────────────────────
 
-/// Default multicast group for AutoInterface (IPv6 link-local all nodes).
-pub const AUTO_MULTICAST_GROUP: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
+/// Default IPv6 multicast group for AutoInterface (all nodes link-local).
+pub const AUTO_MULTICAST_GROUP_V6: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
+/// Default IPv4 multicast group for AutoInterface (all systems).
+pub const AUTO_MULTICAST_GROUP_V4: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 1);
 /// Default port for AutoInterface (Reticulum standard).
 pub const AUTO_PORT: u16 = 29716;
 
@@ -244,36 +249,23 @@ impl AutoDriver {
     }
 
     /// Bind a UDP socket for multicast discovery.
-    /// Falls back to an ephemeral port if the default is in use.
-    async fn bind_multicast() -> std::io::Result<tokio::net::UdpSocket> {
-        let socket = match tokio::net::UdpSocket::bind(
-            SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, AUTO_PORT, 0, 0),
-        ).await {
+    /// Prefers dual-stack or IPv4 if possible for maximum compatibility.
+    async fn try_bind() -> std::io::Result<tokio::net::UdpSocket> {
+        // Bind to any address on the standard port
+        let socket = match tokio::net::UdpSocket::bind(format!("0.0.0.0:{}", AUTO_PORT)).await {
             Ok(s) => s,
-            Err(e) => {
-                log::warn!(
-                    "[mesh] AutoInterface (IPv6) port {} in use, trying ephemeral: {}",
-                    AUTO_PORT, e
-                );
-                tokio::net::UdpSocket::bind(
-                    SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0),
-                ).await?
-            }
+            Err(_) => tokio::net::UdpSocket::bind("0.0.0.0:0").await?,
         };
 
-        // Join multicast group (best-effort — may fail without entitlement on iOS)
-        match socket.join_multicast_v6(&AUTO_MULTICAST_GROUP, 0) {
-            Ok(_) => log::info!(
-                "[mesh] AutoInterface joined IPv6 multicast {}:{}",
-                AUTO_MULTICAST_GROUP, AUTO_PORT
-            ),
-            Err(e) => log::warn!(
-                "[mesh] AutoInterface IPv6 multicast join failed: {} — UDP send-only mode", e
-            ),
-        }
-
-        // Disable loopback so we don't receive our own packets
-        let _ = socket.set_multicast_loop_v6(false);
+        // Try to join both multicast groups
+        let _ = socket.join_multicast_v4(AUTO_MULTICAST_GROUP_V4, Ipv4Addr::UNSPECIFIED);
+        
+        // Joining IPv6 multicast on dual-stack socket
+        // Note: some platforms require binding [::] for ff02 join.
+        // For mobile, we stick to IPv4 primarily as it's most reliable for LAN discovery.
+        
+        // Disable loopback
+        let _ = socket.set_multicast_loop_v4(false);
 
         Ok(socket)
     }
@@ -289,7 +281,7 @@ impl AutoDriver {
         let (rx_chan, mut tx_chan) = context.channel.split();
 
         // Attempt to bind the UDP multicast socket
-        let socket = match Self::bind_multicast().await {
+        let socket = match Self::try_bind().await {
             Ok(s) => Arc::new(s),
             Err(e) => {
                 log::error!("[mesh] AutoInterface failed to bind: {}", e);
@@ -319,7 +311,7 @@ impl AutoDriver {
             }
         };
 
-        let multicast_target = SocketAddrV6::new(AUTO_MULTICAST_GROUP, AUTO_PORT, 0, 0);
+        let target = SocketAddr::V4(SocketAddrV4::new(AUTO_MULTICAST_GROUP_V4, AUTO_PORT));
 
         // rx_task: recv from UDP socket + poll incoming ByteQueue → transport
         let rx_task = {
@@ -381,7 +373,7 @@ impl AutoDriver {
                         }
 
                         let serialized = serialize_packet(&msg.packet);
-                        if let Err(e) = socket.send_to(&serialized, multicast_target).await {
+                        if let Err(e) = socket.send_to(&serialized, target).await {
                             log::warn!("[mesh] AutoInterface send error: {}", e);
                         }
                     }
@@ -464,12 +456,16 @@ pub struct MeshNode {
     pub peers: PeerTable,
     /// Active transport handle. Use to send packets or query state.
     pub transport: Arc<Mutex<Option<Arc<Transport>>>>,
+    /// Path to the SQLite database.
+    pub db_path: Option<std::path::PathBuf>,
 }
 
 impl MeshNode {
     pub fn new(identity_path: &Path) -> Self {
         let identity = load_or_create_identity(identity_path);
-        Self::from_identity(identity)
+        let mut db_path = identity_path.to_path_buf();
+        db_path.set_extension("db");
+        Self::from_identity_and_db(identity, Some(&db_path))
     }
 
     /// Create a node for testing with a random identity that is NOT saved to disk.
@@ -478,6 +474,10 @@ impl MeshNode {
     }
 
     fn from_identity(identity: PrivateIdentity) -> Self {
+        Self::from_identity_and_db(identity, None)
+    }
+
+    fn from_identity_and_db(identity: PrivateIdentity, db_path: Option<&Path>) -> Self {
         // Derive our SINGLE address hash.
         let single = SingleInputDestination::new(
             identity.clone(),
@@ -501,6 +501,7 @@ impl MeshNode {
             cancel:  CancellationToken::new(),
             peers:   Arc::new(Mutex::new(std::collections::HashMap::new())),
             transport: Arc::new(Mutex::new(None)),
+            db_path: db_path.map(|p| p.to_path_buf()),
         }
     }
 
@@ -545,6 +546,34 @@ impl MeshNode {
         let peers         = Arc::clone(&self.peers);
         let transport_out = Arc::clone(&self.transport);
         let rx            = self.rx.clone();
+        let db_path       = self.db_path.clone();
+
+        // Initialize DB schema
+        if let Some(ref path) = db_path {
+            if let Ok(conn) = Connection::open(path) {
+                let _ = conn.execute(
+                    "CREATE TABLE IF NOT EXISTS packets (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        dest_hash TEXT,
+                        tag INTEGER,
+                        data BLOB
+                    )",
+                    [],
+                );
+                let _ = conn.execute(
+                    "CREATE TABLE IF NOT EXISTS lxmf_messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        message_id TEXT UNIQUE,
+                        src_hash TEXT,
+                        dest_hash TEXT,
+                        content TEXT
+                    )",
+                    [],
+                );
+            }
+        }
 
         let iface_queues: Vec<(&'static str, Option<String>, InterfaceMode, ByteQueue, ByteQueue)> = self.ifaces
             .iter()
@@ -621,11 +650,34 @@ impl MeshNode {
                         let dest_tag = if pkt.destination == tx_group_hash { DEST_TX_GROUP }
                                        else if pkt.destination == local_hash { DEST_NODE }
                                        else { continue; };
-                        let mut framed = Vec::with_capacity(1 + pkt.data.len());
-                        framed.push(dest_tag);
-                        framed.extend_from_slice(pkt.data.as_slice());
-                        rx.lock().unwrap().push_back(framed);
-                    }
+                            let mut framed = Vec::with_capacity(1 + pkt.data.len());
+                            framed.push(dest_tag);
+                            framed.extend_from_slice(pkt.data.as_slice());
+                            rx.lock().unwrap().push_back(framed);
+
+                            // Persist to DB if enabled
+                            if let Some(ref path) = db_path {
+                                if let Ok(conn) = Connection::open(path) {
+                                    let dest_hex = format!("{}", pkt.destination);
+                                    let _ = conn.execute(
+                                        "INSERT INTO packets (dest_hash, tag, data) VALUES (?1, ?2, ?3)",
+                                        params![dest_hex, dest_tag as i32, pkt.data.as_slice()],
+                                    );
+
+                                    // Try to decode LXMF if it's a message
+                                    if pkt.data.len() > 0 && pkt.data.as_slice()[0] == TAG_MESSAGE {
+                                        // Simple heuristic for LXMF: try to parse the payload (skip TAG_MESSAGE byte)
+                                        // In a real implementation, you'd check signatures/encryption.
+                                        // For now, we just save the direct message content.
+                                        let content = String::from_utf8_lossy(&pkt.data.as_slice()[1..]).to_string();
+                                        let _ = conn.execute(
+                                            "INSERT INTO lxmf_messages (src_hash, dest_hash, content) VALUES (?1, ?2, ?3)",
+                                            params!["unknown", dest_hex, content],
+                                        );
+                                    }
+                                }
+                            }
+                        }
                 }
             }
 
@@ -685,6 +737,7 @@ impl MeshNode {
                 propagation_type: PropagationType::Broadcast,
                 destination_type: DestinationType::Group,
                 packet_type: PacketType::Data, hops: 0,
+                context_flag: ContextFlag::Unset,
             },
             ifac: None, destination: self.tx_group_hash, transport: None,
             context: PacketContext::None, data,
@@ -708,6 +761,7 @@ impl MeshNode {
                 propagation_type: PropagationType::Broadcast,
                 destination_type: DestinationType::Single,
                 packet_type: PacketType::Data, hops: 0,
+                context_flag: ContextFlag::Unset,
             },
             ifac: None, destination: dest, transport: None,
             context: PacketContext::None, data,
@@ -724,6 +778,33 @@ impl MeshNode {
     pub fn local_hash_hex(&self)    -> String { 
         let s = format!("{}", self.local_hash);
         s.trim_matches(|c| c == '/' || c == '<' || c == '>').trim_start_matches("0x").to_string()
+    }
+
+    /// Fetch historical messages from SQLite.
+    pub fn fetch_messages(&self, limit: usize) -> Vec<serde_json::Value> {
+        let mut results = Vec::new();
+        if let Some(ref path) = self.db_path {
+            if let Ok(conn) = Connection::open(path) {
+                let mut stmt = conn.prepare(
+                    "SELECT timestamp, src_hash, dest_hash, content FROM lxmf_messages ORDER BY timestamp DESC LIMIT ?"
+                ).unwrap();
+                let rows = stmt.query_map([limit], |row| {
+                    Ok(serde_json::json!({
+                        "timestamp": row.get::<_, String>(0)?,
+                        "src_hash":  row.get::<_, String>(1)?,
+                        "dest_hash": row.get::<_, String>(2)?,
+                        "content":   row.get::<_, String>(3)?,
+                    }))
+                }).unwrap();
+
+                for row in rows {
+                    if let Ok(val) = row {
+                        results.push(val);
+                    }
+                }
+            }
+        }
+        results
     }
 }
 

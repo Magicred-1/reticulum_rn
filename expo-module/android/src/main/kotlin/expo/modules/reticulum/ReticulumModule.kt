@@ -5,6 +5,9 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.Promise
 import kotlinx.coroutines.*
 import android.util.Log
+import android.content.Intent
+import android.os.Build
+import expo.modules.reticulum.service.ReticulumForegroundService
 
 private const val TAG = "ReticulumModule"
 
@@ -35,6 +38,14 @@ class ReticulumModule : Module() {
 
         AsyncFunction("start") { promise: Promise ->
             if (meshStart()) {
+                val context = appContext.reactContext ?: return@AsyncFunction
+                val intent = Intent(context, ReticulumForegroundService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+
                 startPollLoop()
                 sendEvent("onMeshStateChanged", mapOf("running" to true))
                 promise.resolve(true)
@@ -44,6 +55,11 @@ class ReticulumModule : Module() {
         }
 
         Function("stop") {
+            val context = appContext.reactContext
+            if (context != null) {
+                val intent = Intent(context, ReticulumForegroundService::class.java)
+                context.stopService(intent)
+            }
             stopPollLoop()
             meshStop()
             sendEvent("onMeshStateChanged", mapOf("running" to false))
@@ -113,7 +129,18 @@ class ReticulumModule : Module() {
             meshClearPeers()
         }
 
+        AsyncFunction("fetchMessages") { limit: Int, promise: Promise ->
+            val json = meshFetchMessages(limit)
+            if (json != null) promise.resolve(json)
+            else promise.reject("FETCH_FAILED", "Failed to fetch messages from DB", null)
+        }
+
         OnDestroy {
+            val context = appContext.reactContext
+            if (context != null) {
+                val intent = Intent(context, ReticulumForegroundService::class.java)
+                context.stopService(intent)
+            }
             stopPollLoop()
             meshStop()
             scope.cancel()
@@ -192,6 +219,9 @@ class ReticulumModule : Module() {
     private external fun meshGetPeerHash(index: Int): String?
     private external fun meshGetPeerAppData(index: Int): ByteArray?
     private external fun meshClearPeers()
+
+    /** Returns JSON string or null. */
+    private external fun meshFetchMessages(limit: Int): String?
 
     companion object {
         init {

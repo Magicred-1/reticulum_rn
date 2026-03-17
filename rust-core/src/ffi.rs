@@ -310,3 +310,35 @@ pub unsafe extern "C" fn mesh_get_peer(
 pub unsafe extern "C" fn mesh_clear_peers() {
     if let Some(n) = NODE.lock().unwrap().as_ref() { n.clear_peers(); }
 }
+
+/// Fetch historical messages from SQLite. Returns JSON array string.
+/// Caller provides buffer and receives length in `out_len`.
+#[no_mangle]
+pub unsafe extern "C" fn mesh_fetch_messages(
+    limit:   u32,
+    buf:     *mut u8,
+    buf_len: usize,
+    out_len: *mut usize,
+) -> bool {
+    if buf.is_null() || out_len.is_null() { return false; }
+    let guard = NODE.lock().unwrap();
+    let n = match guard.as_ref() {
+        Some(n) => n,
+        None    => return false,
+    };
+
+    let messages = n.fetch_messages(limit as usize);
+    let json     = serde_json::to_string(&messages).unwrap_or_else(|_| "[]".to_string());
+    let bytes    = json.as_bytes();
+
+    if bytes.len() > buf_len {
+        unsafe { *out_len = bytes.len(); }
+        return false; // buffer too small
+    }
+
+    unsafe {
+        ptr::copy_nonoverlapping(bytes.as_ptr(), buf, bytes.len());
+        *out_len = bytes.len();
+    }
+    true
+}
